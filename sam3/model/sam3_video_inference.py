@@ -77,7 +77,9 @@ class Sam3VideoInference(Sam3VideoBase):
         # values that don't change across frames (so we only need to hold one copy of them)
         inference_state["constants"] = {}
         # inputs on each frame
-        self._construct_initial_input_batch(inference_state, images)
+        self._construct_initial_input_batch(
+            inference_state, images, offload_video_to_cpu=offload_video_to_cpu
+        )
         # initialize extra states
         inference_state["tracker_inference_states"] = []
         inference_state["tracker_metadata"] = {}
@@ -110,7 +112,9 @@ class Sam3VideoInference(Sam3VideoBase):
         inference_state["cached_frame_outputs"].clear()
         inference_state["action_history"].clear()  # for logging user actions
 
-    def _construct_initial_input_batch(self, inference_state, images):
+    def _construct_initial_input_batch(
+        self, inference_state, images, offload_video_to_cpu=False
+    ):
         """Construct an initial `BatchedDatapoint` instance as input."""
         # 1) img_batch
         num_frames = len(images)
@@ -147,7 +151,20 @@ class Sam3VideoInference(Sam3VideoBase):
             find_targets=[None] * num_frames,
             find_metadatas=[None] * num_frames,
         )
-        input_batch = copy_data_to_device(input_batch, device, non_blocking=True)
+
+        if offload_video_to_cpu:
+            # If offloading to CPU, we want to keep `img_batch` on CPU but move everything else to device.
+            # copy_data_to_device creates a deep copy on the device.
+            # To avoid copying the heavy images to GPU and then discarding them, we temporarily replace
+            # img_batch with a dummy, move the rest, and then restore the CPU images.
+            real_images = input_batch.img_batch
+            # Use a dummy tensor of size 0
+            input_batch.img_batch = torch.empty(0)
+            input_batch = copy_data_to_device(input_batch, device, non_blocking=True)
+            # Restore real images (still on CPU)
+            input_batch.img_batch = real_images
+        else:
+            input_batch = copy_data_to_device(input_batch, device, non_blocking=True)
         inference_state["input_batch"] = input_batch
 
         # construct the placeholder interactive prompts and tracking queries
@@ -477,7 +494,7 @@ class Sam3VideoInference(Sam3VideoBase):
 
             # slice those valid entries from the original outputs
             keep_idx = torch.nonzero(keep, as_tuple=True)[0]
-            keep_idx_gpu = keep_idx.pin_memory().to(
+            keep_idx_gpu = keep_idx.to(
                 device=out_binary_masks.device, non_blocking=True
             )
 
@@ -795,7 +812,7 @@ class Sam3VideoInference(Sam3VideoBase):
         return inference_state
 
     @torch.inference_mode()
-    @torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+    # @torch.autocast(device_type="cuda", dtype=torch.bfloat16)
     def warm_up_compilation(self):
         """
         Warm up the model by running a dummy inference to compile the model. This is
@@ -805,9 +822,10 @@ class Sam3VideoInference(Sam3VideoBase):
             return
         self._warm_up_complete = False
         if self.device.type != "cuda":
-            raise RuntimeError(
-                f"The model must be on CUDA for warm-up compilation, got {self.device=}."
+            logger.warning(
+                f"Skipping warm-up compilation as device is {self.device} (not cuda)."
             )
+            return
 
         # temporally set to single GPU temporarily for warm-up compilation
         orig_rank = self.rank
@@ -903,7 +921,7 @@ class Sam3VideoInference(Sam3VideoBase):
         )
         return frame_idx, self._postprocess_output(inference_state, out)
 
-    @torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+    # @torch.autocast(device_type="cuda", dtype=torch.bfloat16)
     def forward(self, input: BatchedDatapoint, is_inference: bool = False):
         """This method is only used for benchmark eval (not used in the demo)."""
         # set the model to single GPU for benchmark evaluation (to be compatible with trainer)

@@ -78,7 +78,7 @@ class Sam3TrackerPredictor(Sam3TrackerBase):
         if offload_state_to_cpu:
             inference_state["storage_device"] = torch.device("cpu")
         else:
-            inference_state["storage_device"] = torch.device("cuda")
+            inference_state["storage_device"] = self.device
 
         if video_path is not None:
             images, video_height, video_width = load_video_frames(

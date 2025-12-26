@@ -549,8 +549,7 @@ def _load_checkpoint(model, checkpoint_path):
 
 def _setup_device_and_mode(model, device, eval_mode):
     """Setup model device and evaluation mode."""
-    if device == "cuda":
-        model = model.cuda()
+    model = model.to(device)
     if eval_mode:
         model.eval()
     return model
@@ -558,7 +557,7 @@ def _setup_device_and_mode(model, device, eval_mode):
 
 def build_sam3_image_model(
     bpe_path=None,
-    device="cuda" if torch.cuda.is_available() else "cpu",
+    device="cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu"),
     eval_mode=True,
     checkpoint_path=None,
     load_from_HF=True,
@@ -571,7 +570,7 @@ def build_sam3_image_model(
 
     Args:
         bpe_path: Path to the BPE tokenizer vocabulary
-        device: Device to load the model on ('cuda' or 'cpu')
+        device: Device to load the model on ('cuda', 'mps' or 'cpu')
         eval_mode: Whether to set the model to evaluation mode
         checkpoint_path: Optional path to model checkpoint
         enable_segmentation: Whether to enable segmentation head
@@ -657,7 +656,7 @@ def build_sam3_video_model(
     geo_encoder_use_img_cross_attn: bool = True,
     strict_state_dict_loading: bool = True,
     apply_temporal_disambiguation: bool = True,
-    device="cuda" if torch.cuda.is_available() else "cpu",
+    device="cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu"),
     compile=False,
 ) -> Sam3VideoInferenceWithInstanceInteractivity:
     """
@@ -791,6 +790,10 @@ def build_sam3_video_model(
 
 
 def build_sam3_video_predictor(*model_args, gpus_to_use=None, **model_kwargs):
-    return Sam3VideoPredictorMultiGPU(
-        *model_args, gpus_to_use=gpus_to_use, **model_kwargs
-    )
+    if torch.cuda.is_available():
+        return Sam3VideoPredictorMultiGPU(
+            *model_args, gpus_to_use=gpus_to_use, **model_kwargs
+        )
+    else:
+        from sam3.model.sam3_video_predictor import Sam3VideoPredictor
+        return Sam3VideoPredictor(*model_args, **model_kwargs)

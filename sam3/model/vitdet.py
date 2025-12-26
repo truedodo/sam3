@@ -461,7 +461,86 @@ class Attention(nn.Module):
             return q, k
 
         assert self.freqs_cis is not None
-        return apply_rotary_enc(q, k, freqs_cis=self.freqs_cis)
+        
+        # Handle dynamic resolution
+        freqs_cis = self.freqs_cis
+        if q.ndim == 4:
+            # q shape: [B, H, W, D] (before reshape in forward it was token sequence)
+            # Actually in forward: q [B, nHead, L, C]
+            # Wait, `forward` permutes q to [B, nHead, L, C].
+            # L = H*W.
+            # We need to deduce current H, W from L.
+            pass
+        
+        # q is [B, nHead, L, C]
+        B, nHead, L, C = q.shape
+        # Assuming square input for now as ViT usually does
+        s = 1 if self.cls_token else 0
+        H = W = int(math.sqrt(L)) # This might be slightly wrong if not square but ViT usually is.
+        
+        # freqs_cis shape: [FlattenedL, C] or [H, W, C]?
+        # compute_axial_cis returns [H, W, D].
+        # _setup_rope_freqs calls compute_axial_cis.
+        # But wait, compute_axial_cis returns (H, W, D) at line 57?
+        # let's check compute_axial_cis return shape
+        # It calls torch.cat([freqs_cis_x, freqs_cis_y], dim=-1). 
+        # freqs_cis_x is outer product of t_x and freqs_x. t_x is vector.
+        # It creates 2D grid.
+        
+        # self.freqs_cis is likely [H_pre, W_pre, D]
+        
+        if freqs_cis.shape[0] * freqs_cis.shape[1] != L:
+             # Need to interpolate
+             # freqs_cis is complex64/128 usually? No, it's polar -> complex. 
+             # torch.interpolate doesn't support complex.
+             # We might need to view as real, interpolate, view as complex.
+             
+             # Reshape to [H_pre, W_pre, D] if it's not already
+             if freqs_cis.ndim == 2:
+                  # If it was flattened
+                  size = int(math.sqrt(freqs_cis.shape[0]))
+                  freqs_cis = freqs_cis.view(size, size, -1)
+             
+             # Interpolate
+             # Permute to [1, D, H_pre, W_pre] for interpolate
+             # View as real: [H, W, D] -> [H, W, D, 1] (no) -> D is complex? 
+             # wait, apply_rotary_enc expects complex?
+             # reshape_for_broadcast expects (H, W).
+             
+             # Actually, simpler approach:
+             # Just recompute cis if size changed?
+             # Recomputing is cheap enough?
+             # compute_axial_cis is just some arange and outer.
+             # Yes, recomputing is safer and correct.
+             
+             # But we need parameters from _setup_rope_freqs
+             if hasattr(self, 'compute_cis'):
+                  # We can recompute
+                  freqs_cis = self.compute_cis(
+                      end_x=H,
+                      end_y=W,
+                      scale_pos=1.0 # Or scale if we consider it a zoom?
+                      # If we 1008 -> 336, we are zooming out? No we are just processing fewer pixels.
+                      # Standard Resize: semantic field of view is same, resolution drops.
+                      # So positions should be scaled?
+                      # Input range 0..H. 
+                      # If we use `scale_pos` to map 0..H_new to 0..H_old?
+                      # If we use standard ViT resize, we usually just recompute pos emb for new size 0..H_new.
+                  )
+                  if self.cls_token:
+                      t = torch.zeros(
+                          self.head_dim // 2,
+                          dtype=torch.float32,
+                          device=freqs_cis.device,
+                      )
+                      cls_freqs_cis = torch.polar(torch.ones_like(t), t)[None, :]
+                      freqs_cis = torch.cat([cls_freqs_cis, freqs_cis], dim=0)
+             else:
+                  # Fallback or error
+                  pass
+
+        freqs_cis = freqs_cis.to(q.device)
+        return apply_rotary_enc(q, k, freqs_cis=freqs_cis)
 
     def forward(self, x: Tensor) -> Tensor:
         s = 1 if self.cls_token else 0  # used to exclude cls_token

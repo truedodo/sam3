@@ -100,7 +100,7 @@ def load_video_frames(
     img_mean=(0.5, 0.5, 0.5),
     img_std=(0.5, 0.5, 0.5),
     async_loading_frames=False,
-    compute_device=torch.device("cuda"),
+    compute_device=torch.device("cuda") if torch.cuda.is_available() else (torch.device("mps") if torch.backends.mps.is_available() else torch.device("cpu")),
 ):
     """
     Load the video frames from video_path. The frames are resized to image_size as in
@@ -141,7 +141,7 @@ def load_video_frames_from_jpg_images(
     img_mean=(0.5, 0.5, 0.5),
     img_std=(0.5, 0.5, 0.5),
     async_loading_frames=False,
-    compute_device=torch.device("cuda"),
+    compute_device=torch.device("cuda") if torch.cuda.is_available() else (torch.device("mps") if torch.backends.mps.is_available() else torch.device("cpu")),
 ):
     """
     Load the video frames from a directory of JPEG files ("<frame_index>.jpg" format).
@@ -207,7 +207,7 @@ def load_video_frames_from_video_file(
     offload_video_to_cpu,
     img_mean=(0.5, 0.5, 0.5),
     img_std=(0.5, 0.5, 0.5),
-    compute_device=torch.device("cuda"),
+    compute_device=torch.device("cuda") if torch.cuda.is_available() else (torch.device("mps") if torch.backends.mps.is_available() else torch.device("cpu")),
 ):
     """Load the video frames from a video file."""
     import decord

@@ -22,6 +22,15 @@ logger = get_logger(__name__)
 IS_MAIN_PROCESS = os.getenv("IS_MAIN_PROCESS", "1") == "1"
 RANK = int(os.getenv("RANK", "0"))
 
+def get_inference_device():
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    elif torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+INFERENCE_DEVICE = get_inference_device()
+
 IMAGE_EXTS = [".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"]
 VIDEO_EXTS = [".mp4", ".mov", ".avi", ".mkv", ".webm"]
 
@@ -63,7 +72,7 @@ def load_resource_as_video_frames(
             images.append(img)
         images = torch.stack(images)
         if not offload_video_to_cpu:
-            images = images.cuda()
+            images = images.to(INFERENCE_DEVICE)
         return images, orig_height, orig_width
 
     is_image = (
@@ -104,9 +113,9 @@ def load_image_as_single_frame_video(
     img_mean = torch.tensor(img_mean, dtype=torch.float16)[:, None, None]
     img_std = torch.tensor(img_std, dtype=torch.float16)[:, None, None]
     if not offload_video_to_cpu:
-        images = images.cuda()
-        img_mean = img_mean.cuda()
-        img_std = img_std.cuda()
+        images = images.to(INFERENCE_DEVICE)
+        img_mean = img_mean.to(INFERENCE_DEVICE)
+        img_std = img_std.to(INFERENCE_DEVICE)
     # normalize by mean and std
     images -= img_mean
     images /= img_std
@@ -201,9 +210,9 @@ def load_video_frames_from_image_folder(
     ):
         images[n], video_height, video_width = _load_img_as_tensor(img_path, image_size)
     if not offload_video_to_cpu:
-        images = images.cuda()
-        img_mean = img_mean.cuda()
-        img_std = img_std.cuda()
+        images = images.to(INFERENCE_DEVICE)
+        img_mean = img_mean.to(INFERENCE_DEVICE)
+        img_std = img_std.to(INFERENCE_DEVICE)
     # normalize by mean and std
     images -= img_mean
     images /= img_std
@@ -248,8 +257,18 @@ def load_video_frames_from_video_file(
             if async_thread is not None:
                 async_thread.join()
         return lazy_images, lazy_images.video_height, lazy_images.video_width
+    elif video_loader_type == "lazy_cv2":
+        logger.info("Using LazyVideoLoader (OpenCV) to load video file")
+        lazy_images = LazyVideoLoader(
+            video_path=video_path,
+            image_size=image_size,
+            offload_video_to_cpu=offload_video_to_cpu,
+            img_mean=img_mean,
+            img_std=img_std,
+        )
+        return lazy_images, lazy_images.video_height, lazy_images.video_width
     else:
-        raise RuntimeError("video_loader_type must be either 'cv2' or 'torchcodec'")
+        raise RuntimeError(f"video_loader_type must be either 'cv2', 'torchcodec', or 'lazy_cv2'; got {video_loader_type}")
 
 
 def load_video_frames_from_video_file_using_cv2(
@@ -307,9 +326,9 @@ def load_video_frames_from_video_file_using_cv2(
     img_mean = torch.tensor(img_mean, dtype=torch.float16).view(1, 3, 1, 1)
     img_std = torch.tensor(img_std, dtype=torch.float16).view(1, 3, 1, 1)
     if not offload_video_to_cpu:
-        video_tensor = video_tensor.cuda()
-        img_mean = img_mean.cuda()
-        img_std = img_std.cuda()
+        video_tensor = video_tensor.to(INFERENCE_DEVICE)
+        img_mean = img_mean.to(INFERENCE_DEVICE)
+        img_std = img_std.to(INFERENCE_DEVICE)
     # normalize by mean and std
     video_tensor -= img_mean
     video_tensor /= img_std
@@ -323,7 +342,7 @@ def load_dummy_video(image_size, offload_video_to_cpu, num_frames=60):
     video_height, video_width = 480, 640  # dummy original video sizes
     images = torch.randn(num_frames, 3, image_size, image_size, dtype=torch.float16)
     if not offload_video_to_cpu:
-        images = images.cuda()
+        images = images.to(INFERENCE_DEVICE)
     return images, video_height, video_width
 
 
@@ -392,7 +411,7 @@ class AsyncImageFrameLoader:
         img -= self.img_mean
         img /= self.img_std
         if not self.offload_video_to_cpu:
-            img = img.cuda()
+            img = img.to(INFERENCE_DEVICE)
         self.images[index] = img
         return img
 
@@ -503,16 +522,18 @@ class AsyncVideoFileLoaderWithTorchCodec:
         use_rand_seek_in_loading=False,
     ):
         # Check and possibly infer the output device (and also get its GPU id when applicable)
-        assert gpu_device is None or gpu_device.type == "cuda"
+        # assert gpu_device is None or gpu_device.type == "cuda"
+        
         gpu_id = (
             gpu_device.index
-            if gpu_device is not None and gpu_device.index is not None
-            else torch.cuda.current_device()
+            if gpu_device is not None and gpu_device.index is not None and gpu_device.type == "cuda"
+            else (torch.cuda.current_device() if torch.cuda.is_available() else 0)
         )
         if offload_video_to_cpu:
             out_device = torch.device("cpu")
         else:
-            out_device = torch.device("cuda") if gpu_device is None else gpu_device
+            out_device = torch.device("cuda") if (gpu_device is None and torch.cuda.is_available()) else (gpu_device if gpu_device else INFERENCE_DEVICE)
+        
         self.out_device = out_device
         self.gpu_acceleration = gpu_acceleration
         self.gpu_id = gpu_id
@@ -526,9 +547,12 @@ class AsyncVideoFileLoaderWithTorchCodec:
         self.img_std = img_std
 
         if gpu_acceleration:
-            self.img_mean = self.img_mean.to(f"cuda:{self.gpu_id}")
-            self.img_std = self.img_std.to(f"cuda:{self.gpu_id}")
-            decoder_option = {"device": f"cuda:{self.gpu_id}"}
+            self.img_mean = self.img_mean.to(self.out_device)
+            self.img_std = self.img_std.to(self.out_device)
+            if self.out_device.type == "cuda":
+                decoder_option = {"device": f"cuda:{self.gpu_id}"}
+            else:
+                 decoder_option = {"device": "cpu"}
         else:
             self.img_mean = self.img_mean.cpu()
             self.img_std = self.img_std.cpu()
@@ -705,5 +729,118 @@ class AsyncVideoFileLoaderWithTorchCodec:
         self.pbar = None
         self.thread = None
         self.rand_seek_idx_queue = None
-        self.torchcodec_access_lock = contextlib.nullcontext()
         return self.__dict__.copy()
+
+
+class LazyVideoLoader:
+    """
+    Lazy video loader using OpenCV. Only loads frames when accessed.
+    """
+    def __init__(
+        self,
+        video_path,
+        image_size,
+        offload_video_to_cpu,
+        img_mean,
+        img_std,
+    ):
+        self.video_path = video_path
+        self.image_size = image_size
+        self.offload_video_to_cpu = offload_video_to_cpu
+        self.img_mean = img_mean
+        self.img_std = img_std
+        self.cap = None
+
+        import cv2
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            raise ValueError(f"Could not open video: {video_path}")
+        self.num_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        self.video_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        self.video_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        cap.release()
+        
+        # Cache for the last accessed frame to avoid reloading for repeated access in short duration
+        self._last_frame_idx = -1
+        self._last_frame_tensor = None
+
+        if isinstance(img_mean, (list, tuple)):
+            self.img_mean = torch.tensor(img_mean, dtype=torch.float16)[:, None, None]
+        if isinstance(img_std, (list, tuple)):
+            self.img_std = torch.tensor(img_std, dtype=torch.float16)[:, None, None]
+
+        device = get_inference_device()
+        self.device = torch.device("cpu") if offload_video_to_cpu else device
+        
+        if not self.offload_video_to_cpu:
+            self.img_mean = self.img_mean.to(self.device)
+            self.img_std = self.img_std.to(self.device)
+
+    def _ensure_cap_open(self):
+        import cv2
+        if self.cap is None or not self.cap.isOpened():
+            self.cap = cv2.VideoCapture(self.video_path)
+            if not self.cap.isOpened():
+                raise ValueError(f"Could not open video: {self.video_path}")
+
+    def __len__(self):
+        return self.num_frames
+
+    def __getitem__(self, index):
+        if index < 0 or index >= self.num_frames:
+            raise IndexError(f"Index {index} out of range for video with {self.num_frames} frames")
+        
+        if index == self._last_frame_idx and self._last_frame_tensor is not None:
+             return self._last_frame_tensor
+
+        self._ensure_cap_open()
+        
+        import cv2
+        # Use set to seek
+        self.cap.set(cv2.CAP_PROP_POS_FRAMES, index)
+        ret, frame = self.cap.read()
+        if not ret:
+            # Fallback or error
+            raise RuntimeError(f"Could not read frame {index} from {self.video_path}")
+
+        # Process frame
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        frame_resized = cv2.resize(
+            frame_rgb, (self.image_size, self.image_size), interpolation=cv2.INTER_CUBIC
+        )
+        
+        # To tensor
+        frame_np = frame_resized.astype(np.float32) / 255.0
+        frame_tensor = torch.from_numpy(frame_np).permute(2, 0, 1).to(dtype=torch.float16) # (C, H, W)
+
+        # Normalize
+        # Ensure img_mean/std are on same device as frame_tensor (CPU for now)
+        # frame_tensor is on CPU by default.
+        
+        if self.offload_video_to_cpu:
+             frame_tensor = frame_tensor.cpu()
+             mean = self.img_mean.cpu()
+             std = self.img_std.cpu()
+        else:
+             frame_tensor = frame_tensor.to(self.device)
+             mean = self.img_mean
+             std = self.img_std
+             
+        frame_tensor -= mean
+        frame_tensor /= std
+        
+        self._last_frame_idx = index
+        self._last_frame_tensor = frame_tensor
+        return frame_tensor
+    
+    def __getstate__(self):
+        d = self.__dict__.copy()
+        if "cap" in d:
+             d["cap"] = None # Cannot pickle capture
+        return d
+    
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self.cap = None
+
+

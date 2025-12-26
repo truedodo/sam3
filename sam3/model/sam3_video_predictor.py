@@ -48,7 +48,6 @@ class Sam3VideoPredictor:
                 strict_state_dict_loading=strict_state_dict_loading,
                 apply_temporal_disambiguation=apply_temporal_disambiguation,
             )
-            .cuda()
             .eval()
         )
 
@@ -60,6 +59,7 @@ class Sam3VideoPredictor:
             return self.start_session(
                 resource_path=request["resource_path"],
                 session_id=request.get("session_id", None),
+                offload_video_to_cpu=request.get("offload_video_to_cpu", False),
             )
         elif request_type == "add_prompt":
             return self.add_prompt(
@@ -99,7 +99,7 @@ class Sam3VideoPredictor:
         else:
             raise RuntimeError(f"invalid request type: {request_type}")
 
-    def start_session(self, resource_path, session_id=None):
+    def start_session(self, resource_path, session_id=None, offload_video_to_cpu=False):
         """
         Start a new inference session on an image or a video. Here `resource_path`
         can be either a path to an image file (for image inference) or an MP4 file
@@ -114,6 +114,7 @@ class Sam3VideoPredictor:
             resource_path=resource_path,
             async_loading_frames=self.async_loading_frames,
             video_loader_type=self.video_loader_type,
+            offload_video_to_cpu=offload_video_to_cpu,
         )
         if not session_id:
             session_id = str(uuid.uuid4())
@@ -265,21 +266,33 @@ class Sam3VideoPredictor:
             f"'{session_id}' ({session['state']['num_frames']} frames)"
             for session_id, session in self._ALL_INFERENCE_STATES.items()
         ]
-        session_stats_str = (
-            f"live sessions: [{', '.join(live_session_strs)}], GPU memory: "
-            f"{torch.cuda.memory_allocated() // 1024**2} MiB used and "
-            f"{torch.cuda.memory_reserved() // 1024**2} MiB reserved"
-            f" (max over time: {torch.cuda.max_memory_allocated() // 1024**2} MiB used "
-            f"and {torch.cuda.max_memory_reserved() // 1024**2} MiB reserved)"
-        )
+        if torch.cuda.is_available():
+            session_stats_str = (
+                f"live sessions: [{', '.join(live_session_strs)}], GPU memory: "
+                f"{torch.cuda.memory_allocated() // 1024**2} MiB used and "
+                f"{torch.cuda.memory_reserved() // 1024**2} MiB reserved"
+                f" (max over time: {torch.cuda.max_memory_allocated() // 1024**2} MiB used "
+                f"and {torch.cuda.max_memory_reserved() // 1024**2} MiB reserved)"
+            )
+        elif torch.backends.mps.is_available():
+            session_stats_str = (
+                f"live sessions: [{', '.join(live_session_strs)}], MPS device used"
+            )
+        else:
+            session_stats_str = f"live sessions: [{', '.join(live_session_strs)}], CPU used"
         return session_stats_str
 
     def _get_torch_and_gpu_properties(self):
         """Get a string for PyTorch and GPU properties (for logging and debugging)."""
-        torch_and_gpu_str = (
-            f"torch: {torch.__version__} with CUDA arch {torch.cuda.get_arch_list()}, "
-            f"GPU device: {torch.cuda.get_device_properties(torch.cuda.current_device())}"
-        )
+        if torch.cuda.is_available():
+            torch_and_gpu_str = (
+                f"torch: {torch.__version__} with CUDA arch {torch.cuda.get_arch_list()}, "
+                f"GPU device: {torch.cuda.get_device_properties(torch.cuda.current_device())}"
+            )
+        elif torch.backends.mps.is_available():
+            torch_and_gpu_str = f"torch: {torch.__version__}, Device: MPS"
+        else:
+            torch_and_gpu_str = f"torch: {torch.__version__}, Device: CPU"
         return torch_and_gpu_str
 
     def shutdown(self):

@@ -26,13 +26,17 @@ classifiers = [
 ]
 dependencies = [
     "timm>=1.0.17",
-    "numpy>=1.26,<2",
+    "numpy>=2.0",
     "tqdm",
     "ftfy==6.1.1",
     "regex",
     "iopath>=0.1.10",
     "typing_extensions",
     "huggingface_hub",
+    "scipy",
+    "pycocotools",
+    "psutil",
+    "opencv-python",
 ]
 
 [project.optional-dependencies]
