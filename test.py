@@ -53,7 +53,7 @@ print("Starting camera feed... Press 'q' to quit.")
 last_masks, last_boxes, last_scores = None, None, None
 
 # Pre-compute text features once
-text_prompt = "a traffic cone"
+text_prompt = "a person"
 print(f"Pre-computing features for prompt: '{text_prompt}'...")
 with torch.inference_mode():
     text_features = model.backbone.forward_text([text_prompt], device=device)
